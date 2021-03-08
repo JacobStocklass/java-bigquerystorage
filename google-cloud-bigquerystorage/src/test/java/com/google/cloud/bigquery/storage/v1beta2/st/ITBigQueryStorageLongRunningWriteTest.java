@@ -45,12 +45,12 @@ import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import org.junit.AfterClass;
 import org.junit.Assert;
+import org.junit.Assume;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.threeten.bp.LocalDateTime;
@@ -65,17 +65,21 @@ public class ITBigQueryStorageLongRunningWriteTest {
       Logger.getLogger(ITBigQueryStorageLongRunningTest.class.getName());
   private static final String LONG_TESTS_ENABLED_PROPERTY =
       "bigquery.storage.enable_long_running_tests";
+  private static final String LONG_TESTS_DISABLED_MESSAGE =
+      String.format(
+          "BigQuery Storage long running tests are not enabled and will be skipped. "
+              + "To enable them, set system property '%s' to true.",
+          LONG_TESTS_ENABLED_PROPERTY);
   private static final String DESCRIPTION = "BigQuery Write Java long test dataset";
 
   private static String dataset;
   private static BigQueryWriteClient client;
   private static String parentProjectId;
   private static BigQuery bigquery;
-  private static int requestLimit = 100;
+  private static int requestLimit = 1000;
 
   private static JSONObject MakeJsonObject(RowComplexity complexity) throws IOException {
     JSONObject object = new JSONObject();
-    // size: (1, simple)(2,complex)()
     // TODO(jstocklass): Add option for testing protobuf format using StreamWriter2
     switch (complexity) {
       case SIMPLE:
@@ -153,8 +157,63 @@ public class ITBigQueryStorageLongRunningWriteTest {
     return object;
   }
 
+  private static TableInfo MakeSimpleSchemaTable(String name) {
+    TableInfo tableInfo =
+        TableInfo.newBuilder(
+                TableId.of(dataset, name),
+                StandardTableDefinition.of(
+                    Schema.of(
+                        com.google.cloud.bigquery.Field.newBuilder(
+                                "test_str", StandardSQLTypeName.STRING)
+                            .build(),
+                        com.google.cloud.bigquery.Field.newBuilder(
+                                "test_numerics", StandardSQLTypeName.NUMERIC)
+                            .setMode(Field.Mode.REPEATED)
+                            .build(),
+                        com.google.cloud.bigquery.Field.newBuilder(
+                                "test_datetime", StandardSQLTypeName.DATETIME)
+                            .build())))
+            .build();
+    bigquery.create(tableInfo);
+    return tableInfo;
+  }
+
+  private static TableInfo MakeComplexSchemaTable(String name) {
+    TableInfo tableInfo =
+        TableInfo.newBuilder(
+                TableId.of(dataset, name),
+                StandardTableDefinition.of(
+                    Schema.of(
+                        Field.newBuilder("test_str", StandardSQLTypeName.STRING).build(),
+                        Field.newBuilder("test_numerics1", StandardSQLTypeName.NUMERIC)
+                            .setMode(Mode.REPEATED)
+                            .build(),
+                        Field.newBuilder("test_numerics2", StandardSQLTypeName.NUMERIC)
+                            .setMode(Mode.REPEATED)
+                            .build(),
+                        Field.newBuilder("test_numerics3", StandardSQLTypeName.NUMERIC)
+                            .setMode(Mode.REPEATED)
+                            .build(),
+                        Field.newBuilder("test_datetime", StandardSQLTypeName.DATETIME).build(),
+                        Field.newBuilder("test_bools", StandardSQLTypeName.BOOL)
+                            .setMode(Mode.REPEATED)
+                            .build(),
+                        Field.newBuilder(
+                                "test_subs",
+                                StandardSQLTypeName.STRUCT,
+                                Field.of("sub_bool", StandardSQLTypeName.BOOL),
+                                Field.of("sub_int", StandardSQLTypeName.INT64),
+                                Field.of("sub_string", StandardSQLTypeName.STRING))
+                            .setMode(Mode.REPEATED)
+                            .build())))
+            .build();
+    bigquery.create(tableInfo);
+    return tableInfo;
+  }
+
   @BeforeClass
   public static void beforeClass() throws IOException {
+    Assume.assumeTrue(LONG_TESTS_DISABLED_MESSAGE, Boolean.getBoolean(LONG_TESTS_ENABLED_PROPERTY));
     parentProjectId = String.format("projects/%s", ServiceOptions.getDefaultProjectId());
 
     client = BigQueryWriteClient.create();
@@ -182,31 +241,13 @@ public class ITBigQueryStorageLongRunningWriteTest {
   public void testDefaultStreamSimpleSchema()
       throws IOException, InterruptedException, ExecutionException,
           Descriptors.DescriptorValidationException {
-    // TODO(jstocklass): Set up a default stream. Write to it for a long time,
-    // (a few minutes for now) and make sure that everything goes well, report stats.
     LOG.info(
         String.format(
             "%s tests running with parent project: %s",
             ITBigQueryStorageLongRunningWriteTest.class.getSimpleName(), parentProjectId));
 
     String tableName = "JsonSimpleTableDefaultStream";
-    TableInfo tableInfo =
-        TableInfo.newBuilder(
-                TableId.of(dataset, tableName),
-                StandardTableDefinition.of(
-                    Schema.of(
-                        com.google.cloud.bigquery.Field.newBuilder(
-                                "test_str", StandardSQLTypeName.STRING)
-                            .build(),
-                        com.google.cloud.bigquery.Field.newBuilder(
-                                "test_numerics", StandardSQLTypeName.NUMERIC)
-                            .setMode(Field.Mode.REPEATED)
-                            .build(),
-                        com.google.cloud.bigquery.Field.newBuilder(
-                                "test_datetime", StandardSQLTypeName.DATETIME)
-                            .build())))
-            .build();
-    bigquery.create(tableInfo);
+    TableInfo tableInfo = MakeSimpleSchemaTable(tableName);
 
     long averageLatency = 0;
     long totalLatency = 0;
@@ -222,10 +263,7 @@ public class ITBigQueryStorageLongRunningWriteTest {
         ApiFuture<AppendRowsResponse> response = jsonStreamWriter.append(jsonArr, -1);
         long finishTime = System.nanoTime();
         Assert.assertFalse(response.get().getAppendResult().hasOffset());
-        // Ignore first entry, it is way slower than the others and ruins expected behavior
-        if (i != 0) {
-          totalLatency += (finishTime - startTime);
-        }
+        totalLatency += (finishTime - startTime);
       }
       averageLatency = totalLatency / (requestLimit - 1);
       // TODO(jstocklass): Is there a better way to get this than to log it?
@@ -252,42 +290,13 @@ public class ITBigQueryStorageLongRunningWriteTest {
           Descriptors.DescriptorValidationException {
     StandardSQLTypeName[] array = new StandardSQLTypeName[] {StandardSQLTypeName.INT64};
     String complexTableName = "JsonComplexTableDefaultStream";
-    TableInfo tableInfo2 =
-        TableInfo.newBuilder(
-                TableId.of(dataset, complexTableName),
-                StandardTableDefinition.of(
-                    Schema.of(
-                        Field.newBuilder("test_str", StandardSQLTypeName.STRING).build(),
-                        Field.newBuilder("test_numerics1", StandardSQLTypeName.NUMERIC)
-                            .setMode(Mode.REPEATED)
-                            .build(),
-                        Field.newBuilder("test_numerics2", StandardSQLTypeName.NUMERIC)
-                            .setMode(Mode.REPEATED)
-                            .build(),
-                        Field.newBuilder("test_numerics3", StandardSQLTypeName.NUMERIC)
-                            .setMode(Mode.REPEATED)
-                            .build(),
-                        Field.newBuilder("test_datetime", StandardSQLTypeName.DATETIME).build(),
-                        Field.newBuilder("test_bools", StandardSQLTypeName.BOOL)
-                            .setMode(Mode.REPEATED)
-                            .build(),
-                        Field.newBuilder(
-                                "test_subs",
-                                StandardSQLTypeName.STRUCT,
-                                Field.of("sub_bool", StandardSQLTypeName.BOOL),
-                                Field.of("sub_int", StandardSQLTypeName.INT64),
-                                Field.of("sub_string", StandardSQLTypeName.STRING))
-                            .setMode(Mode.REPEATED)
-                            .build())))
-            .build();
-    bigquery.create(tableInfo2);
-
+    TableInfo tableInfo = MakeComplexSchemaTable(complexTableName);
     long totalLatency = 0;
     long averageLatency = 0;
     TableName parent =
         TableName.of(ServiceOptions.getDefaultProjectId(), dataset, complexTableName);
     try (JsonStreamWriter jsonStreamWriter =
-        JsonStreamWriter.newBuilder(parent.toString(), tableInfo2.getDefinition().getSchema())
+        JsonStreamWriter.newBuilder(parent.toString(), tableInfo.getDefinition().getSchema())
             .createDefaultStream()
             .build()) {
       for (int i = 0; i < requestLimit; i++) {
@@ -305,13 +314,13 @@ public class ITBigQueryStorageLongRunningWriteTest {
       LOG.info("Complex average Latency: " + String.valueOf(averageLatency) + " ns");
       TableResult result2 =
           bigquery.listTableData(
-              tableInfo2.getTableId(), BigQuery.TableDataListOption.startIndex(0L));
+              tableInfo.getTableId(), BigQuery.TableDataListOption.startIndex(0L));
       Iterator<FieldValueList> iter = result2.getValues().iterator();
-      FieldValueList currentRow2;
+      FieldValueList currentRow;
       for (int i = 0; i < requestLimit; i++) {
         assertTrue(iter.hasNext());
-        currentRow2 = iter.next();
-        assertEquals("aaa", currentRow2.get(0).getStringValue());
+        currentRow = iter.next();
+        assertEquals("aaa", currentRow.get(0).getStringValue());
       }
       assertEquals(false, iter.hasNext());
     }
@@ -322,23 +331,7 @@ public class ITBigQueryStorageLongRunningWriteTest {
       throws IOException, InterruptedException, ExecutionException,
           Descriptors.DescriptorValidationException {
     String tableName = "JsonSimpleAsyncTableDefaultStream";
-    TableInfo tableInfo =
-        TableInfo.newBuilder(
-                TableId.of(dataset, tableName),
-                StandardTableDefinition.of(
-                    Schema.of(
-                        com.google.cloud.bigquery.Field.newBuilder(
-                                "test_str", StandardSQLTypeName.STRING)
-                            .build(),
-                        com.google.cloud.bigquery.Field.newBuilder(
-                                "test_numerics", StandardSQLTypeName.NUMERIC)
-                            .setMode(Field.Mode.REPEATED)
-                            .build(),
-                        com.google.cloud.bigquery.Field.newBuilder(
-                                "test_datetime", StandardSQLTypeName.DATETIME)
-                            .build())))
-            .build();
-    bigquery.create(tableInfo);
+    TableInfo tableInfo = MakeSimpleSchemaTable(tableName);
     final List<Long> startTimes = new ArrayList<Long>(requestLimit);
     final List<Long> finishTimes = new ArrayList<Long>(requestLimit);
     long averageLatency = 0;
@@ -351,8 +344,6 @@ public class ITBigQueryStorageLongRunningWriteTest {
       for (int i = 0; i < requestLimit; i++) {
         JSONObject row = MakeJsonObject(RowComplexity.SIMPLE);
         JSONArray jsonArr = new JSONArray(new JSONObject[] {row});
-        // TODO(jstocklass): Make asynchronized calls instead of synchronized calls
-        // ApiFutureCallback
         startTimes.add(System.nanoTime());
         ApiFuture<AppendRowsResponse> response = jsonStreamWriter.append(jsonArr, -1);
         ApiFutures.addCallback(
@@ -370,7 +361,6 @@ public class ITBigQueryStorageLongRunningWriteTest {
             });
         Assert.assertFalse(response.get().getAppendResult().hasOffset());
       }
-      TimeUnit.SECONDS.sleep(1);
       for (int i = 0; i < requestLimit; i++) {
         totalLatency += (finishTimes.get(i) - startTimes.get(i));
       }
@@ -380,11 +370,11 @@ public class ITBigQueryStorageLongRunningWriteTest {
           bigquery.listTableData(
               tableInfo.getTableId(), BigQuery.TableDataListOption.startIndex(0L));
       Iterator<FieldValueList> iter = result2.getValues().iterator();
-      FieldValueList currentRow2;
+      FieldValueList currentRow;
       for (int i = 0; i < requestLimit; i++) {
         assertTrue(iter.hasNext());
-        currentRow2 = iter.next();
-        assertEquals("aaa", currentRow2.get(0).getStringValue());
+        currentRow = iter.next();
+        assertEquals("aaa", currentRow.get(0).getStringValue());
       }
       assertEquals(false, iter.hasNext());
     }
@@ -396,35 +386,7 @@ public class ITBigQueryStorageLongRunningWriteTest {
           Descriptors.DescriptorValidationException {
     StandardSQLTypeName[] array = new StandardSQLTypeName[] {StandardSQLTypeName.INT64};
     String complexTableName = "JsonAsyncTableDefaultStream";
-    TableInfo tableInfo2 =
-        TableInfo.newBuilder(
-                TableId.of(dataset, complexTableName),
-                StandardTableDefinition.of(
-                    Schema.of(
-                        Field.newBuilder("test_str", StandardSQLTypeName.STRING).build(),
-                        Field.newBuilder("test_numerics1", StandardSQLTypeName.NUMERIC)
-                            .setMode(Mode.REPEATED)
-                            .build(),
-                        Field.newBuilder("test_numerics2", StandardSQLTypeName.NUMERIC)
-                            .setMode(Mode.REPEATED)
-                            .build(),
-                        Field.newBuilder("test_numerics3", StandardSQLTypeName.NUMERIC)
-                            .setMode(Mode.REPEATED)
-                            .build(),
-                        Field.newBuilder("test_datetime", StandardSQLTypeName.DATETIME).build(),
-                        Field.newBuilder("test_bools", StandardSQLTypeName.BOOL)
-                            .setMode(Mode.REPEATED)
-                            .build(),
-                        Field.newBuilder(
-                                "test_subs",
-                                StandardSQLTypeName.STRUCT,
-                                Field.of("sub_bool", StandardSQLTypeName.BOOL),
-                                Field.of("sub_int", StandardSQLTypeName.INT64),
-                                Field.of("sub_string", StandardSQLTypeName.STRING))
-                            .setMode(Mode.REPEATED)
-                            .build())))
-            .build();
-    bigquery.create(tableInfo2);
+    TableInfo tableInfo = MakeComplexSchemaTable(complexTableName);
     final List<Long> startTimes = new ArrayList<Long>(requestLimit);
     final List<Long> finishTimes = new ArrayList<Long>(requestLimit);
     long averageLatency = 0;
@@ -432,14 +394,12 @@ public class ITBigQueryStorageLongRunningWriteTest {
     TableName parent =
         TableName.of(ServiceOptions.getDefaultProjectId(), dataset, complexTableName);
     try (JsonStreamWriter jsonStreamWriter =
-        JsonStreamWriter.newBuilder(parent.toString(), tableInfo2.getDefinition().getSchema())
+        JsonStreamWriter.newBuilder(parent.toString(), tableInfo.getDefinition().getSchema())
             .createDefaultStream()
             .build()) {
       for (int i = 0; i < requestLimit; i++) {
         JSONObject row = MakeJsonObject(RowComplexity.COMPLEX);
         JSONArray jsonArr = new JSONArray(new JSONObject[] {row});
-        // TODO(jstocklass): Make asynchronized calls instead of synchronized calls
-        // ApiFutureCallback
         startTimes.add(System.nanoTime());
         ApiFuture<AppendRowsResponse> response = jsonStreamWriter.append(jsonArr, -1);
         ApiFutures.addCallback(
@@ -459,18 +419,21 @@ public class ITBigQueryStorageLongRunningWriteTest {
       }
       for (int i = 0; i < requestLimit; i++) {
         totalLatency += (finishTimes.get(i) - startTimes.get(i));
+        if (finishTimes.get(i) == 0) {
+          LOG.info("We have a problem");
+        }
       }
       averageLatency = totalLatency / requestLimit;
       LOG.info("Complex Async average Latency: " + String.valueOf(averageLatency) + " ns");
-      TableResult result2 =
+      TableResult result =
           bigquery.listTableData(
-              tableInfo2.getTableId(), BigQuery.TableDataListOption.startIndex(0L));
-      Iterator<FieldValueList> iter = result2.getValues().iterator();
-      FieldValueList currentRow2;
+              tableInfo.getTableId(), BigQuery.TableDataListOption.startIndex(0L));
+      Iterator<FieldValueList> iter = result.getValues().iterator();
+      FieldValueList currentRow;
       for (int i = 0; i < requestLimit; i++) {
-        assertTrue(iter.hasNext());
-        currentRow2 = iter.next();
-        assertEquals("aaa", currentRow2.get(0).getStringValue());
+        assertTrue("failed at " + i, iter.hasNext());
+        currentRow = iter.next();
+        assertEquals("aaa", currentRow.get(0).getStringValue());
       }
       assertEquals(false, iter.hasNext());
     }
